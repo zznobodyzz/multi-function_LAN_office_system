@@ -1,0 +1,5 @@
+docpath=./documents/
+database=./server.db
+advpertime=60
+printlogflag=0
+#end

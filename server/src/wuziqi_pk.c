@@ -1,0 +1,574 @@
+#include"server_head.h"
+#include"server_wuziqi.h"
+#include"server_game.h"
+
+extern fd_set commonset;
+extern sqlite3 * db;
+extern char game_queue_stat;
+extern int udpfd;
+extern pthread_mutex_t game_queue_lock;
+
+int Read_user1(int user1,int user2,char * user1_name,char * user2_name)
+{
+		USR usr1;
+		USR usr2;
+		SER ser;
+		//从user1读坐标
+		if(read(user1,&usr1,sizeof(usr1))<=0)
+		{
+				close(user1);
+				//读取失败，默认user1弃权，游戏结束
+				ser.sig=GIVEUP;
+				//向user2写失败，关闭其通信
+				if(write(user2,&ser,sizeof(ser))<=0)
+				{
+						close(user2);
+						pthread_exit(NULL);
+				}
+				//写成功，继续服务user2，关闭user1通信
+				FD_SET(user2,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		//若user1弃权
+		if(usr1.cmd==GIVEUP||usr1.cmd==GAME_OVER)
+		{
+				Add_game_score(user2_name,WUZIQI,0);
+				ser.sig=usr1.cmd;
+				//向user2发送信号
+				if(write(user2,&ser,sizeof(ser))<=0)
+				{
+						//若发送失败，游戏结束，关闭user2通信，正常服务user1
+						close(user2);
+						if(read(user1,&usr1,sizeof(usr1))<=0)
+						{
+								close(user1);
+								pthread_exit(NULL);
+						}
+						ser.sig=GAME_OVER;
+						//向user1发送游戏结束信号
+						if(write(user1,&ser,sizeof(ser))<=0)
+						{
+								//若发送失败，关闭user1通信
+								close(user1);
+								pthread_exit(NULL);
+						}
+						//发送成功，正常服务user1
+						FD_SET(user1,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				int ret;
+				//读取user1意向
+				if(read(user1,&usr1,sizeof(usr1))<=0)
+				{
+						ser.sig=GAME_OVER;
+						write(user2,&ser,sizeof(ser));
+						FD_SET(user2,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				ser.sig=usr1.cmd;
+				if(usr1.cmd==GAME_OVER)
+				{
+						write(user2,&ser,sizeof(ser));
+						FD_SET(user1,&commonset);
+						FD_SET(user2,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				if(usr1.cmd==AGAIN)
+				{
+						if(write(user2,&ser,sizeof(ser))<=0)
+						{
+								close(user2);
+								ser.sig=GAME_OVER;
+								write(user1,&ser,sizeof(ser));
+								FD_SET(user1,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+						if(read(user2,&usr2,sizeof(usr1))<=0)
+						{
+								close(user2);
+								ser.sig=GAME_OVER;
+								write(user1,&ser,sizeof(ser));
+								FD_SET(user1,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+						//若双方都有再次游戏意向，重新开始游戏
+						if(usr2.cmd==AGAIN)
+						{
+								ser.sig=AGAIN;
+								write(user1,&ser,sizeof(ser));
+								return 1;
+						}
+						//若无，继续正常服务user1/2
+						if(usr2.cmd==GAME_OVER)
+						{
+								ser.sig=GAME_OVER;
+								write(user1,&ser,sizeof(ser));
+								FD_SET(user1,&commonset);
+								FD_SET(user2,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+				}			
+		}
+		//若为正常走棋，将坐标发送给user2
+		else
+		{
+				ser.sig=REGULAR;
+				strcpy(ser.data,usr1.data);
+				if(write(user2,&ser,sizeof(ser))<=0)
+				{
+						//若发送失败，默认user2弃权，关闭user2通信，发送信号给user1
+						close(user2);
+						ser.sig=GIVEUP;
+						if(write(user1,&ser,sizeof(ser))<=0)
+						{
+								//若向user1发送失败，关闭user1通信
+								close(user1);
+								pthread_exit(NULL);
+						}
+						//继续服务user1
+						FD_SET(user1,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				return 0;
+		}
+}
+
+int Read_user2(int user1,int user2,char * user1_name,char * user2_name)
+{
+		USR usr1;
+		USR usr2;
+		SER ser;
+		//从user2读坐标
+		if(read(user2,&usr2,sizeof(usr1))<=0)
+		{
+				close(user2);
+				//读取失败，默认user2弃权，游戏结束
+				ser.sig=GIVEUP;
+				//向user1写失败，关闭其通信
+				if(write(user1,&ser,sizeof(ser))<=0)
+				{
+						close(user1);
+						pthread_exit(NULL);
+				}
+				//写成功，继续服务user1，关闭user2通信
+				FD_SET(user1,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		//若user2弃权
+		if(usr2.cmd==GIVEUP||usr2.cmd==GAME_OVER)
+		{
+				Add_game_score(user1_name,WUZIQI,0);
+				ser.sig=usr2.cmd;
+				//向user1发送信号
+				if(write(user1,&ser,sizeof(ser))<=0)
+				{
+						//若发送失败，游戏结束，关闭user1通信，正常服务user2
+						close(user1);
+						if(read(user2,&usr2,sizeof(usr1))<=0)
+						{
+								close(user2);
+								pthread_exit(NULL);
+						}
+						ser.sig=GAME_OVER;
+						//向user2发送游戏结束信号
+						if(write(user2,&ser,sizeof(ser))<=0)
+						{
+								//若发送失败，关闭user2通信
+								close(user2);
+								pthread_exit(NULL);
+						}
+						//发送成功，正常服务user2
+						FD_SET(user2,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				int ret;
+				//读取user2意向
+				if(read(user2,&usr2,sizeof(usr1))<=0)
+				{
+						ser.sig=GAME_OVER;
+						write(user1,&ser,sizeof(ser));
+						FD_SET(user1,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				ser.sig=usr2.cmd;
+				if(usr2.cmd==GAME_OVER)
+				{
+						write(user1,&ser,sizeof(ser));
+						FD_SET(user1,&commonset);
+						FD_SET(user2,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				if(usr2.cmd==AGAIN)
+				{
+						if(write(user1,&ser,sizeof(ser))<=0)
+						{
+								close(user1);
+								ser.sig=GAME_OVER;
+								write(user2,&ser,sizeof(ser));
+								FD_SET(user2,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+						if(read(user1,&usr1,sizeof(usr1))<=0)
+						{
+								close(user1);
+								ser.sig=GAME_OVER;
+								write(user2,&ser,sizeof(ser));
+								FD_SET(user2,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+						//若双方都有再次游戏意向，重新开始游戏
+						if(usr1.cmd==AGAIN)
+						{
+								ser.sig=AGAIN;
+								write(user2,&ser,sizeof(ser));
+								return 1;
+						}
+						//若无，继续正常服务user1/2
+						if(usr1.cmd==GAME_OVER)
+						{
+								ser.sig=GAME_OVER;
+								write(user2,&ser,sizeof(ser));
+								FD_SET(user1,&commonset);
+								FD_SET(user2,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+				}			
+		}
+		//若为正常走棋，将坐标发送给user1
+		else
+		{
+				ser.sig=REGULAR;
+				strcpy(ser.data,usr2.data);
+				if(write(user1,&ser,sizeof(ser))<=0)
+				{
+						//若发送失败，默认user1弃权，关闭user1通信，发送信号给user2
+						close(user1);
+						ser.sig=GIVEUP;
+						if(write(user2,&ser,sizeof(ser))<=0)
+						{
+								//若向user1发送失败，关闭user1通信
+								close(user2);
+								pthread_exit(NULL);
+						}
+						//继续服务user2
+						FD_SET(user2,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				return 0;
+		}
+}
+
+void Wuziqi_game_start(int user1,int user2,char * user1_name,char * user2_name)
+{
+		USR usr1;
+		USR usr2;
+		SER ser;
+		//读取双方准备信号
+		if(read(user1,&usr1,sizeof(usr1))<=0)
+		{
+				close(user1);
+				if(read(user2,&usr2,sizeof(usr1))<=0)
+				{		
+						close(user2);
+						pthread_exit(NULL);
+				}
+				if(usr2.cmd==GAME_READY)
+				{
+						ser.sig=GAME_INIT_ERR;
+						write(user2,&ser,sizeof(ser));
+				}
+				FD_SET(user2,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		if(read(user2,&usr2,sizeof(usr1))<=0)
+		{
+				close(user2);
+				if(usr1.cmd==GAME_READY)
+				{
+						ser.sig=GAME_INIT_ERR;
+						write(user1,&ser,sizeof(ser));
+				}
+				FD_SET(user1,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		printf("%d,%d\n",usr1.cmd,usr2.cmd);
+		//如果user1、user2都初始化失败,直接结束
+		if((usr1.cmd==GAME_INIT_ERR)&&(usr2.cmd==GAME_INIT_ERR))
+		{
+				FD_SET(user1,&commonset);
+				FD_SET(user2,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		//如果user1初始化失败,向user2发送游戏结束信号
+		else if((usr1.cmd==GAME_INIT_ERR)&&(usr2.cmd==GAME_READY))
+		{
+				ser.sig=GAME_OVER;
+				write(user2,&ser,sizeof(ser));
+				FD_SET(user1,&commonset);
+				FD_SET(user2,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		//如果user2初始化失败,向user1发送游戏结束信号
+		else if((usr2.cmd==GAME_INIT_ERR)&&(usr1.cmd==GAME_READY))
+		{
+				ser.sig=GAME_OVER;
+				write(user1,&ser,sizeof(ser));
+				FD_SET(user1,&commonset);
+				FD_SET(user2,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		//都初始化成功，向两方发送先后顺序信号
+		else if((usr1.cmd==GAME_READY)&&(usr2.cmd==GAME_READY))
+		{
+				ser.sig=GAME_READY;
+				write(user1,&ser,sizeof(ser));
+				write(user2,&ser,sizeof(ser));
+				int order,next_order;
+				srand((unsigned)time(NULL));
+				order=rand()%2;
+				next_order=1-order;
+				if(order==0)
+				{
+						ser.sig=FIRST;
+						write(user1,&ser,sizeof(ser));
+						ser.sig=SECOND;
+						write(user2,&ser,sizeof(ser));
+				}
+				else 
+				{
+						ser.sig=FIRST;
+						write(user2,&ser,sizeof(ser));
+						ser.sig=SECOND;
+						write(user1,&ser,sizeof(ser));
+				}
+				while(1)
+				{
+						if(order==0)
+						{
+								while(1)
+								{
+										if(Read_user1(user1,user2,user1_name,user2_name)==1)
+												break;
+										if(Read_user2(user1,user2,user1_name,user2_name)==1)
+												break;
+								}
+						}
+						else
+						{
+								while(1)
+								{
+										if(Read_user2(user1,user2,user1_name,user2_name)==1)
+												break;
+										if(Read_user1(user1,user2,user1_name,user2_name)==1)
+												break;
+								}
+						}
+						order=next_order;
+						next_order=1-order;
+				}
+		}
+}
+
+void * Wuziqi_pk(void * arg)
+{
+		pthread_detach(pthread_self());
+		int sockfd;
+		SER ser;
+		USR usr;
+		char cmd[MAX_CMD];
+		char ** result;
+		int nrow;
+		int ncolumn;
+		char * errmsg;
+		int sockfd2;
+		char addr[MAX_ADDR];
+		struct sockaddr_in caddr;
+		int len=sizeof(struct sockaddr_in);
+		caddr.sin_family=PF_INET;
+		caddr.sin_port=htons(SERVER_UDP_PORT);
+
+		sockfd=*(int *)arg;
+		free(arg);
+		//如果游戏等待队列出现问题，则停止响应游戏请求
+		if(game_queue_stat==0)
+		{
+				ser.sig=GAME_UNABLE;
+				write(sockfd,&ser,sizeof(ser));
+				FD_SET(sockfd,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		ser.sig=GET_WUZIQI_PK;
+		write(sockfd,&ser,sizeof(ser));
+		//读取请求的对手姓名
+		if(read(sockfd,&usr,sizeof(usr))<=0)
+		{
+				printf("客户端主动断开连接\n");
+				close(sockfd);
+				pthread_exit(NULL);
+		}
+		if(usr.cmd==GAME_CEL)
+		{
+				FD_SET(sockfd,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_exit(NULL);
+		}
+		if(usr.cmd==GAME_NOT_ACCEPT)
+		{
+				FD_SET(sockfd,&commonset);
+				kill(getpid(),SIGUSR2);
+				pthread_mutex_lock(&game_queue_lock);
+				sockfd2=Search_game_queue(usr.data,WUZIQI);
+				pthread_mutex_unlock(&game_queue_lock);
+				if(sockfd2!=-1)
+				{
+						ser.sig==GAME_NOT_ACCEPT;
+						write(sockfd2,&ser,sizeof(ser));
+				}
+				pthread_exit(NULL);
+		}
+		if(usr.cmd==GAME_ACCEPT)
+		{
+				pthread_mutex_lock(&game_queue_lock);
+				//先在队列中查找，若存在，开始游戏
+				if((sockfd2=Search_game_queue(usr.data,WUZIQI))>0)
+				{
+						pthread_mutex_unlock(&game_queue_lock);
+						//清除队列
+						pthread_mutex_lock(&game_queue_lock);
+						Clean_game_queue(sockfd2);
+						pthread_mutex_unlock(&game_queue_lock);
+						//向发出请求端发送游戏开始信号，客户端需要向其对应的服务器线程发送游戏开始信号
+						ser.sig=GAME_START;
+						write(sockfd2,&ser,sizeof(ser));
+						write(sockfd,&ser,sizeof(ser));
+						//该线程转而用来交换游戏数据
+						sprintf(cmd,"update client set game=1 where name='%s'",usr.name);
+						sqlite3_exec(db,cmd,NULL,NULL,&errmsg);
+						Wuziqi_game_start(sockfd,sockfd2,usr.name,usr.data);
+						//游戏结束后,清游戏标志位
+						sprintf(cmd,"update client set game=0 where name='%s'",usr.name);
+						sqlite3_exec(db,cmd,NULL,NULL,&errmsg);
+						sprintf(cmd,"update client set game=0 where name='%s'",usr.data);
+						sqlite3_exec(db,cmd,NULL,NULL,&errmsg);
+						//线程退出,继续服务
+						FD_SET(sockfd,&commonset);
+						FD_SET(sockfd2,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				//若不存在，可能是调度错误
+				else
+				{
+						pthread_mutex_unlock(&game_queue_lock);
+						ser.sig=PK_ERR;
+						write(sockfd,&ser,sizeof(ser));
+						FD_SET(sockfd,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+		}
+		//若usrcmd不为上面几种，表示发起请求者
+		else
+		{
+				//找到被请求的客户端地址
+				sprintf(cmd,"select addr from client where name='%s' and stat=1 and game=0",usr.data);
+				if(sqlite3_get_table(db,cmd,&result,&nrow,&ncolumn,&errmsg)!=SQLITE_OK)
+				{
+						printf("查询用户是否在线 操作失败\n");
+						printf("%s\n",errmsg);
+						ser.sig=SER_ERR;
+						write(sockfd,&ser,sizeof(ser));
+						FD_SET(sockfd,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				if(nrow==0)
+				{
+						ser.sig=PK_ERR;
+						write(sockfd,&ser,sizeof(ser));
+						FD_SET(sockfd,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				caddr.sin_addr.s_addr=inet_addr(result[1]);
+				strcpy(ser.data,usr.name);
+				ser.sig=WUZIQI_PK;
+				//向被请求客户端发送游戏请求信号
+				if(sendto(udpfd,&ser,sizeof(ser),0,(struct sockaddr *)&caddr,len)<0)
+				{
+						ser.sig=PK_ERR;
+						write(sockfd,&ser,sizeof(ser));
+						FD_SET(sockfd,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				//将当前客户端放入游戏等待队列
+				pthread_mutex_lock(&game_queue_lock);
+				if(Set_game_queue(sockfd,usr.name,WUZIQI)==SET_GAME_QUEUE_FAILURE)
+				{
+						pthread_mutex_unlock(&game_queue_lock);
+						ser.sig=SER_ERR;
+						write(sockfd,&ser,sizeof(ser));
+						FD_SET(sockfd,&commonset);
+						kill(getpid(),SIGUSR2);
+						pthread_exit(NULL);
+				}
+				else
+				{
+						pthread_mutex_unlock(&game_queue_lock);
+						//向客户端发送成功信号，客户端开始超时计时
+						ser.sig=SET_GAME_QUEUE_OK;
+						write(sockfd,&ser,sizeof(ser));
+						if(read(sockfd,&usr,sizeof(usr))<=0)
+						{
+								printf("客户端主动断开连接\n");
+								close(sockfd);
+								pthread_mutex_lock(&game_queue_lock);
+								Clean_game_queue(sockfd);
+								pthread_mutex_unlock(&game_queue_lock);
+								pthread_exit(NULL);
+						}
+						//如果游戏开始，直接结束线程
+						if(usr.cmd==GAME_START)
+						{
+								sprintf(cmd,"update client set game=1 where name='%s'",usr.name);
+								sqlite3_exec(db,cmd,NULL,NULL,&errmsg);
+								pthread_exit(NULL);
+						}
+						//如果客户端超时或取消游戏请求，正常退出
+						if(usr.cmd==GAME_CEL)
+						{
+								pthread_mutex_lock(&game_queue_lock);
+								Clean_game_queue(sockfd);
+								pthread_mutex_unlock(&game_queue_lock);
+								FD_SET(sockfd,&commonset);
+								kill(getpid(),SIGUSR2);
+								pthread_exit(NULL);
+						}
+						else 
+								printf("error!!!!!!!\n");
+				}
+		}
+}
